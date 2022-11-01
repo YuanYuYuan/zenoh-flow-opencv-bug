@@ -55,8 +55,8 @@ impl std::fmt::Debug for CameraState {
 
 impl CameraState {
     fn new() -> Self {
-        // let camera = videoio::VideoCapture::new(0, videoio::CAP_ANY).unwrap(); // 0 is the default camera
-        let camera = videoio::VideoCapture::from_file(FILE, videoio::CAP_ANY).unwrap();
+        let camera = videoio::VideoCapture::new(0, videoio::CAP_ANY).unwrap(); // 0 is the default camera
+        // let camera = videoio::VideoCapture::from_file(FILE, videoio::CAP_ANY).unwrap();
         let opened = videoio::VideoCapture::is_opened(&camera).unwrap();
         if !opened {
             panic!("Unable to open default camera!");
@@ -129,21 +129,21 @@ impl Node for CameraSource {
 }
 
 #[derive(Debug)]
-struct VideoSink;
+struct VideoSink {
+    tx: flume::Sender<Vec<u8>>,
+}
 
 #[derive(ZFState, Clone, Debug)]
 struct VideoState {
     pub window_name: String,
-    pub count: usize,
 }
 
 impl VideoState {
     pub fn new() -> Self {
         let window_name = &"Video-Sink".to_string();
-        highgui::named_window(window_name, 1).unwrap();
+        // highgui::named_window(window_name, 1).unwrap();
         Self {
             window_name: window_name.to_string(),
-            count: 0,
         }
     }
 }
@@ -154,9 +154,9 @@ impl Node for VideoSink {
         Ok(State::from(VideoState::new()))
     }
 
-    fn finalize(&self, state: &mut State) -> ZFResult<()> {
-        let state = state.try_get::<VideoState>()?;
-        highgui::destroy_window(&state.window_name).unwrap();
+    fn finalize(&self, _state: &mut State) -> ZFResult<()> {
+        // let state = state.try_get::<VideoState>()?;
+        // highgui::destroy_window(&state.window_name).unwrap();
         Ok(())
     }
 }
@@ -166,28 +166,15 @@ impl Sink for VideoSink {
     async fn run(
         &self,
         _context: &mut zenoh_flow::Context,
-        dyn_state: &mut State,
+        _dyn_state: &mut State,
         mut input: zenoh_flow::runtime::message::DataMessage,
     ) -> zenoh_flow::ZFResult<()> {
         // Downcasting to right type
-        let state = dyn_state.try_get::<VideoState>()?;
+        // let state = dyn_state.try_get::<VideoState>()?;
 
         let data = input.get_inner_data().try_as_bytes()?.as_ref().clone();
+        self.tx.send(data)?;
 
-        let decoded = opencv::imgcodecs::imdecode(
-            &opencv::types::VectorOfu8::from_iter(data),
-            opencv::imgcodecs::IMREAD_COLOR,
-        )
-        .unwrap();
-        let params = opencv::types::VectorOfi32::new();
-        if decoded.size().unwrap().width > 0 {
-            // highgui::imshow("MyWindow", &decoded).unwrap();
-            // highgui::imshow(&state.window_name, &decoded).unwrap();
-            opencv::imgcodecs::imwrite(&format!("test-{}.jpg", state.count), &decoded, &params).unwrap();
-            state.count += 1;
-        }
-
-        highgui::wait_key(10).unwrap();
         Ok(())
     }
 }
@@ -210,8 +197,9 @@ async fn main() {
     let mut zf_graph =
         zenoh_flow::runtime::dataflow::Dataflow::new(ctx.clone(), "video-pipeline".into(), None);
 
+    let (tx, rx) = flume::bounded(2);
     let source = Arc::new(CameraSource);
-    let sink = Arc::new(VideoSink);
+    let sink = Arc::new(VideoSink { tx });
 
     zf_graph
         .try_add_static_source(
@@ -260,6 +248,22 @@ async fn main() {
     for id in &nodes {
         instance.start_node(id).await.unwrap()
     }
+
+    async_std::task::spawn_blocking(move || {
+        loop {
+            while let Ok(data) = rx.recv() {
+                let decoded = opencv::imgcodecs::imdecode(
+                    &opencv::types::VectorOfu8::from_iter(data),
+                    opencv::imgcodecs::IMREAD_COLOR,
+                )
+                .unwrap();
+                if decoded.size().unwrap().width > 0 {
+                    highgui::imshow("Test", &decoded).unwrap();
+                }
+                highgui::wait_key(10).unwrap();
+            }
+        }
+    });
 
     let ctrlc = CtrlC::new().expect("Unable to create Ctrl-C handler");
     let mut stream = ctrlc.enumerate().take(1);
